@@ -34,6 +34,14 @@ Collected resources are organized and classified inside the dashboard, allowing 
 
 ---
 
+### Geopolitics
+
+PRIN fetch live news to check the threats rate in the different countries based on live happenings. However an advance version of this will include AI to improve the analysis.
+
+![Geor](images/geo.png)
+
+---
+
 ### Features
 
 - Interactive intelligence dashboard

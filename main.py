@@ -1,5 +1,5 @@
 # ==============================================================================
-# v1.0.1 - real crawler + connection alert 
+# v1.0.1 - real crawler + connection alert + tutorial video popup
 # ==============================================================================
 
 import os
@@ -44,13 +44,11 @@ from flask import Flask, render_template_string, request, g, redirect, url_for, 
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# --- OPSEC DEPENDENCY CHECK ---
 try:
     import socks
 except ImportError:
-    print("\n[CRITICAL ERROR] PySocks is missing! This is required to prevent IP leaks.")
-    print("Run: pip install pysocks")
-    sys.exit(1)
+    socks = None
+    print("[INFO] PySocks unavailable. Running without Tor.")
 
 # I am using socks5h to force DNS resolution through the Tor node (Anti-DNS Leak)
 TOR_SOCKS_PROXY = "socks5h://127.0.0.1:9150" 
@@ -137,7 +135,6 @@ def classify_content(text):
         
     return best_category
 
-
 IP_CACHE = {}
 IP_QUEUE = set()
 
@@ -205,8 +202,6 @@ def extract_entities(text):
             if found:
                 entities[entity_type] = list(set(found))[:100]
     return entities
-
-# seed links
 
 REQUEST_TIMEOUT = 10 
 MAX_PAGES_PER_SWEEP = 1000   
@@ -464,7 +459,6 @@ def search_db(conn, query, limit=20):
         (qlike, qlike, qlike, limit),
     )
     return cur.fetchall()
-
 
 POSTGRES_CONFIG = {
     "user": "postgres", 
@@ -835,7 +829,8 @@ PRIN_DASHBOARD_TEMPLATE = """
     <!-- CRITICAL ALERT BANNER -->
     <div id="tor-critical-alert" class="tor-alert-banner w-full flex items-center justify-center gap-2 font-mono">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
-        CRITICAL OPSEC FAILURE: Tor proxy connection lost. Crawler automatically halted to prevent real IP exposure. Check Tor Background Service.
+        CRITICAL OPSEC FAILURE: Tor proxy connection lost. Crawler automatically halted to prevent real IP exposure. Check Tor Background Service. 
+        Crawler work only in desktop version service. Check Tutorial.
     </div>
 
     <header class="border-b border-[#262626] bg-[#050905] flex justify-between items-center px-4 py-2 select-none">
@@ -858,6 +853,12 @@ PRIN_DASHBOARD_TEMPLATE = """
         <div class="flex items-center gap-6 font-mono text-xs">
             <div id="clock" class="text-orange-500 w-48 text-right font-bold hidden lg:block"></div>
             <span class="text-gray-500">OPERATOR: <span class="text-orange-500">{{ current_user.username }}</span></span>
+            
+            <!-- NEW TUTORIAL BUTTON -->
+            <button onclick="openTutorialModal()" class="flex items-center gap-2 text-blue-400 hover:text-white font-bold border border-blue-900 bg-blue-900/30 hover:bg-blue-800/50 px-3 py-1 rounded transition-colors shadow-[0_0_10px_rgba(59,130,246,0.2)]">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg> TUTORIAL
+            </button>
+
             <a href="{{ url_for('logout') }}" class="text-red-500 hover:text-red-400 font-bold">[ DISCONNECT ]</a>
         </div>
     </header>
@@ -1133,6 +1134,23 @@ PRIN_DASHBOARD_TEMPLATE = """
         </div>
     </div>
 
+    <!-- TUTORIAL VIDEO MODAL -->
+    <div id="tutorial-modal" class="hidden modal-bg fixed inset-0 bg-black/80 z-[200] flex items-center justify-center p-4">
+        <div class="panel border-blue-500 w-full max-w-4xl border-2 shadow-[0_0_30px_rgba(59,130,246,0.3)] rounded-sm flex flex-col">
+            <div class="panel-header bg-[#050f1a] text-blue-400 flex justify-between items-center border-b border-blue-900/50">
+                <span class="font-bold flex items-center gap-2"><div class="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div> [ SYSTEM OPERATION TUTORIAL (WILL BE UPLOADED SOON) ]</span>
+                <button onclick="closeTutorialModal()" class="text-gray-400 hover:text-white text-lg leading-none cursor-pointer border border-gray-700 px-2 rounded hover:bg-red-900/50 hover:border-red-500">✕</button>
+            </div>
+            <div class="p-2 bg-black w-full aspect-video flex justify-center items-center relative">
+                <!-- Using a standard HTML5 Video for max compatibility, but an iframe works just as well. -->
+                <iframe id="tutorial-video" class="w-full h-full border border-[#333]" src="https://www.youtube.com/embed/jNQXAC9IVRw?enablejsapi=1" title="Tutorial Video" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+            </div>
+            <div class="p-3 bg-[#0a0a0a] border-t border-[#262626] text-gray-400 font-mono text-[10px]">
+                <p>>> TUTORIAL WILL BE UPLOADED SOON TILL THEN ENJOY THESE ELEPHANTS</p>
+            </div>
+        </div>
+    </div>
+
     <script>
         // GLOBALS & STATE
         let torConnected = true;
@@ -1144,6 +1162,20 @@ PRIN_DASHBOARD_TEMPLATE = """
             textArea.select();
             try { document.execCommand('copy'); } catch (err) { console.error('Unable to copy', err); }
             document.body.removeChild(textArea);
+        }
+
+        function openTutorialModal() {
+            document.getElementById('tutorial-modal').classList.remove('hidden');
+        }
+
+        function closeTutorialModal() {
+            document.getElementById('tutorial-modal').classList.add('hidden');
+            // Safely stop video by resetting the iframe source
+            const iframe = document.getElementById('tutorial-video');
+            if (iframe) {
+                let iframeSrc = iframe.src;
+                iframe.src = iframeSrc; 
+            }
         }
 
         async function testAIConnection() {
@@ -2311,7 +2343,6 @@ def api_darkweb_all():
 def api_geopolitics():
     global GLOBAL_GEO_DATA
     return jsonify(GLOBAL_GEO_DATA)
-
 
 def start_dashboard_system():
     print("--- Initializing Secure Intelligence Platform ---")
