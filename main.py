@@ -1,6 +1,5 @@
 # ==============================================================================
-# V1.0.0 This is just a fake crawler to test the UI, main crawler will be linked afterwards
-# Postgres is missing. The crawler exclusively uses your index.db implementation.
+# v1.0.1 - real crawler + connection alert 
 # ==============================================================================
 
 import os
@@ -45,18 +44,60 @@ from flask import Flask, render_template_string, request, g, redirect, url_for, 
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# --- CRITICAL DEPENDENCY CHECK & FAILOVER ---
-TOR_AVAILABLE = True
+# --- OPSEC DEPENDENCY CHECK ---
 try:
     import socks
 except ImportError:
-    print("\n[SYSTEM WARN] PySocks missing. Failing over to SIMULATION MODE for Dark Web Crawler.\n")
-    TOR_AVAILABLE = False
+    print("\n[CRITICAL ERROR] PySocks is missing! This is required to prevent IP leaks.")
+    print("Run: pip install pysocks")
+    sys.exit(1)
 
+# I am using socks5h to force DNS resolution through the Tor node (Anti-DNS Leak)
+TOR_SOCKS_PROXY = "socks5h://127.0.0.1:9150" 
+PROXIES = {"http": TOR_SOCKS_PROXY, "https": TOR_SOCKS_PROXY}
+TOR_CONNECTED = False
 
-# ==============================================================================
-# INTELLIGENCE ENGINE (Moved up for Crawler access)
-# ==============================================================================
+# mimic tor browser exactly to prevent fingerprinting
+TOR_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; rv:109.0) Gecko/20100101 Firefox/115.0"
+HEADERS = {
+    "User-Agent": TOR_USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1"
+}
+
+def check_tor_connection():
+    """Validates if Tor is actively routing traffic safely."""
+    for port in [9150, 9050]:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(2)
+            if s.connect_ex(('127.0.0.1', port)) == 0:
+                return f"socks5h://127.0.0.1:{port}"
+    return None
+
+def tor_watchdog_worker():
+    """Continuously monitors Tor connection. Halts crawler if connection drops."""
+    global TOR_CONNECTED, TOR_SOCKS_PROXY, PROXIES
+    while True:
+        proxy = check_tor_connection()
+        if proxy:
+            if not TOR_CONNECTED:
+                print(f"[OPSEC] Secure Tor Connection Established via {proxy}")
+            TOR_SOCKS_PROXY = proxy
+            PROXIES = {"http": TOR_SOCKS_PROXY, "https": TOR_SOCKS_PROXY}
+            TOR_CONNECTED = True
+        else:
+            if TOR_CONNECTED:
+                print("\n[CRITICAL WARNING] TOR CONNECTION LOST! HALTING CRAWLER TO PREVENT IP LEAK.\n")
+            TOR_CONNECTED = False
+        time.sleep(3)
+
 THREAT_CATEGORIES = {
     "Cybercrime/Malware": ["ransomware", "botnet", "exploit", "0day", "ddos", "malware", "trojan", "keylogger", "rootkit"],
     "Financial Fraud": ["cvv", "fullz", "dumps", "skimmer", "carding", "money laundering", "counterfeit", "bank drop"],
@@ -68,10 +109,6 @@ THREAT_CATEGORIES = {
 }
 
 def classify_content(text):
-    """
-    Intelligently inspects the content and closely matches threat keywords.
-    Returns 'General' if no immediate threat is found so the crawler history remains visible.
-    """
     if not text:
         return "General"
         
@@ -100,14 +137,11 @@ def classify_content(text):
         
     return best_category
 
-# --- ADVANCED INTELLIGENCE PROCESSING MODULE (IOCs & ENTITIES) ---
 
-# IP Geolocation Cache to prevent rate limiting
 IP_CACHE = {}
 IP_QUEUE = set()
 
 def resolve_ip(ip):
-    """Resolves IPv4 addresses to geographical locations using ip-api with LAT/LON extraction."""
     if ip in IP_CACHE:
         return IP_CACHE[ip]
     if ip not in IP_QUEUE:
@@ -115,7 +149,7 @@ def resolve_ip(ip):
     return {"loc": "Unknown Location", "lat": None, "lon": None}
 
 def ip_resolver_worker():
-    """Background thread to slowly resolve IPs without hitting rate limits (45/min)."""
+    """Background thread to slowly resolve IPs without hitting rate limits."""
     while True:
         if IP_QUEUE:
             ip = IP_QUEUE.pop()
@@ -133,14 +167,14 @@ def ip_resolver_worker():
                         }
                     else:
                         IP_CACHE[ip] = {"loc": "Unknown Location", "lat": None, "lon": None}
-                elif res.status_code == 429: # Handled rate limit gracefully
+                elif res.status_code == 429:
                     IP_QUEUE.add(ip)
                     time.sleep(5)
                 else:
                     IP_CACHE[ip] = {"loc": "Unknown Location", "lat": None, "lon": None}
             except Exception:
                 IP_CACHE[ip] = {"loc": "Unknown Location", "lat": None, "lon": None}
-            time.sleep(1.5) # Safe rate limit for ip-api.com
+            time.sleep(1.5)
         else:
             time.sleep(2)
 
@@ -172,21 +206,12 @@ def extract_entities(text):
                 entities[entity_type] = list(set(found))[:100]
     return entities
 
+# seed links
 
-# ==============================================================================
-# EXACT IMPLANT: FAST EXPONENTIAL THREADED TOR CRAWLER
-# ==============================================================================
-
-# ---------------- CONFIG ----------------
-TOR_SOCKS_PROXY = "socks5h://127.0.0.1:9150"  # default fallback
-PROXIES = {"http": TOR_SOCKS_PROXY, "https": TOR_SOCKS_PROXY}
-
-USER_AGENT = "MiniTorCrawler/0.6 (+contact: you@example.com)"
 REQUEST_TIMEOUT = 10 
 MAX_PAGES_PER_SWEEP = 1000   
 MAX_DEPTH = 5          
 MAX_CONTENT_BYTES = 2_000_000
-HEADERS = {"User-Agent": USER_AGENT}
 
 SEED_URLS = [
     "http://juhanurmihxlp77nkq76byazcldy2hlmovfu2epvl5ankdibsot4csyd.onion/", 
@@ -202,7 +227,6 @@ SEED_URLS = [
 
 DB_PATH = "index.db"
 
-# ---------------- DB ----------------
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS pages (
     id INTEGER PRIMARY KEY,
@@ -255,7 +279,7 @@ def save_page(conn, url, title, status, depth, classification, summary=""):
                 (url, title, status, depth, now, classification, summary)
             )
             conn.commit()
-        except Exception as e:
+        except Exception:
             pass
 
 def save_link(conn, from_url, to_url):
@@ -267,7 +291,6 @@ def save_link(conn, from_url, to_url):
         except Exception:
             pass
 
-# ---------------- URL NORMALIZATION ----------------
 def canonicalize(url):
     try:
         parsed = urlparse(url)
@@ -288,10 +311,8 @@ def canonicalize(url):
     return urlunparse((scheme, netloc, safe_path, "", parsed.query or "", ""))
 
 def normalize_url(base, href):
-    if not href:
-        return None
-    if href.startswith(("javascript:", "mailto:", "data:", "tel:")):
-        return None
+    if not href: return None
+    if href.startswith(("javascript:", "mailto:", "data:", "tel:")): return None
     joined = urljoin(base, href)
     joined, _ = urldefrag(joined)
     return canonicalize(joined)
@@ -303,11 +324,22 @@ def is_onion(url):
     except Exception:
         return False
 
-# ---------------- EXPONENTIAL CRAWLER THREAD ----------------
+def get_secure_session():
+    """Forces requests to use a strict proxy session."""
+    session = requests.Session()
+    session.proxies = PROXIES
+    session.headers.update(HEADERS)
+    return session
+
 def fetch_and_parse_url(url, depth):
-    """Worker function executing concurrently."""
+    """Worker function executing concurrently with STRICT OPSEC locks."""
+    if not TOR_CONNECTED:
+        return (None, 0, depth, "Dead Node", "TOR DISCONNECTED - ABORTED", [], [])
+
     try:
-        r = requests.get(url, proxies=PROXIES, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        session = get_secure_session()
+        r = session.get(url, timeout=REQUEST_TIMEOUT)
+        
         if "html" not in r.headers.get("Content-Type", ""):
             return (None, r.status_code, depth, "Dead Node", "Non-HTML Content", [], [])
             
@@ -319,7 +351,6 @@ def fetch_and_parse_url(url, depth):
         classification = classify_content(page_text)
         summary = (page_text[:400] + '...') if len(page_text) > 400 else page_text
         
-        # --- DEEP ENTITY EXTRACTION ---
         extracted_entities = extract_entities(page_text)
         entity_nodes = []
         
@@ -330,7 +361,6 @@ def fetch_and_parse_url(url, depth):
         if 'ipv4_address' in extracted_entities:
             for e in extracted_entities['ipv4_address']: 
                 entity_nodes.append(f"ip:{e}")
-                # Immediately push to resolver thread queue so it maps fast!
                 IP_QUEUE.add(e)
         if 'email' in extracted_entities:
             for e in extracted_entities['email']: entity_nodes.append(f"email:{e}")
@@ -351,7 +381,7 @@ def fetch_and_parse_url(url, depth):
         return (None, 0, depth, "Dead Node", str(e), [], [])
 
 def crawl(seeds, db_path, max_pages=MAX_PAGES_PER_SWEEP, max_depth=MAX_DEPTH):
-    """Manages the ThreadPoolExecutor to crawl extremely fast and map roots"""
+    """Manages the ThreadPoolExecutor securely"""
     visited = set()
     domain_visits = {} 
     futures = {}
@@ -380,6 +410,11 @@ def crawl(seeds, db_path, max_pages=MAX_PAGES_PER_SWEEP, max_depth=MAX_DEPTH):
         pages_crawled = 0
 
         while futures and pages_crawled < max_pages:
+            # Check OPSEC killswitch
+            if not TOR_CONNECTED:
+                print("\n[!] OPSEC ABORT: Tor Disconnected mid-sweep. Terminating swarm.")
+                break
+
             done, _ = concurrent.futures.wait(futures.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
             
             for future in done:
@@ -389,13 +424,9 @@ def crawl(seeds, db_path, max_pages=MAX_PAGES_PER_SWEEP, max_depth=MAX_DEPTH):
                     if not result: continue
                     
                     title, status, depth, classification, summary, new_links, entity_nodes = result
-                    
                     save_page(conn, url, title, status, depth, classification, summary)
                         
                     pages_crawled += 1
-                    if pages_crawled % 10 == 0:
-                        print(f"[*] Swept {pages_crawled} active nodes. Queue Size: {len(futures)}")
-                        
                     current_domain = urlparse(url).netloc
                     
                     for entity_node in entity_nodes:
@@ -418,13 +449,12 @@ def crawl(seeds, db_path, max_pages=MAX_PAGES_PER_SWEEP, max_depth=MAX_DEPTH):
                                     domain_visits[target_domain] = domain_visits.get(target_domain, 0) + 1
                                     futures[executor.submit(fetch_and_parse_url, next_url, depth + 1)] = next_url
 
-                except Exception as e:
+                except Exception:
                     pass
 
     conn.close()
-    print(f"[!] Exponential Sweep Cycle Complete. Active nodes penetrated: {pages_crawled}")
+    print(f"[!] Sweep Cycle Complete or Aborted. Active nodes penetrated: {pages_crawled}")
 
-# ---------------- SEARCH ----------------
 def search_db(conn, query, limit=20):
     cur = conn.cursor()
     qlike = f"%{query}%"
@@ -435,20 +465,6 @@ def search_db(conn, query, limit=20):
     )
     return cur.fetchall()
 
-
-# --- ACTIVE TOR DETECTION UTILITY ---
-def get_active_tor_proxy():
-    """Checks if Tor is actually running on standard ports before crawling."""
-    for port in [9150, 9050]:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-            if s.connect_ex(('127.0.0.1', port)) == 0:
-                return f"socks5h://127.0.0.1:{port}"
-    return None
-
-# ==============================================================================
-# SECTION 2: DASHBOARD CONFIG & LOGIC 
-# ==============================================================================
 
 POSTGRES_CONFIG = {
     "user": "postgres", 
@@ -541,39 +557,6 @@ def get_user(conn, username):
 def check_password(password_hash, password):
     return check_password_hash(password_hash, password)
 
-
-def simulated_darkweb_worker():
-    print("[WORKER] SIMULATION ENGINE ONLINE - Generating Synthetic Threat Intelligence...")
-    sample_titles = ["AlphaBay Dump", "LockBit Data Leak Site", "XSS Forum Mirror", "Carding Mafia", "0day Exploits", "Silk Road Archival"]
-    sample_classes = ["Data Leak", "Marketplace", "Cybercrime/Malware", "Financial Fraud"]
-
-    conn = init_db(DB_PATH)
-
-    while True:
-        try:
-            fake_hash = ''.join(random.choices(string.ascii_lowercase + string.digits, k=56))
-            url = f"http://{fake_hash}.onion"
-            title = random.choice(sample_titles) + f" - Node {random.randint(100, 999)}"
-            fake_class = random.choice(sample_classes)
-            
-            save_page(conn, url, title, 200, random.randint(1, 3), fake_class, "Simulated dark web payload intercept.")
-            
-            fake_target = f"http://{''.join(random.choices(string.ascii_lowercase + string.digits, k=56))}.onion"
-            target_class = random.choice(sample_classes)
-            save_page(conn, fake_target, "Linked Darknet Host", 200, 2, target_class, "Simulated threat hop.")
-            save_link(conn, url, fake_target)
-            
-            save_link(conn, url, f"btc:bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh")
-            
-            # Inject fake IP with valid geocoordinates and immediately queue for resolver to map to Globe!
-            fake_ip = random.choice(["194.126.112.5", "82.118.21.1", "185.158.24.4", "45.14.224.2", "103.208.220.120", "193.106.191.99"])
-            save_link(conn, url, f"ip:{fake_ip}")
-            IP_QUEUE.add(fake_ip)
-            
-            time.sleep(random.uniform(8, 20)) 
-        except Exception as e:
-            time.sleep(5)
-
 def geopolitics_worker():
     global GLOBAL_GEO_DATA, GLOBAL_CURRENCY_RATES
     print("[WORKER] 7-Day Historical Geopolitics Engine started. Ingesting deep feeds...")
@@ -663,7 +646,8 @@ def geopolitics_worker():
         
         try:
             for feed in rss_feeds:
-                resp = requests.get(feed, headers=HEADERS, timeout=10)
+                # Normal requests for RSS. Tor is strictly for the dark web crawler.
+                resp = requests.get(feed, timeout=10) 
                 if resp.status_code == 200:
                     root = ET.fromstring(resp.content)
                     
@@ -716,10 +700,6 @@ def geopolitics_worker():
         loop_counter += 1
         time.sleep(20) 
 
-# ==============================================================================
-# SECTION 6: FLASK WEB APPLICATION (DASHBOARD)
-# ==============================================================================
-
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(24)
 
@@ -750,7 +730,6 @@ def teardown_request(exception):
     db = g.get('db')
     if db is not None and hasattr(db, 'close'): db.close()
 
-# --- LOGIN TEMPLATE ---
 LOGIN_TEMPLATE = """
 <!doctype html>
 <html>
@@ -786,7 +765,6 @@ LOGIN_TEMPLATE = """
 </html>
 """
 
-# --- NEW INTEGRATED PRIN DASHBOARD TEMPLATE WITH AGENTIC AI & GRAPH ---
 PRIN_DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -817,6 +795,7 @@ PRIN_DASHBOARD_TEMPLATE = """
         .layer-btn:hover { border-color: #525252; color: white; }
         .layer-btn.active { background: #1a1a1a; border-color: var(--term-highlight); color: var(--term-highlight); }
         .pulse-dot { width: 8px; height: 8px; background-color: var(--term-green); border-radius: 50%; animation: pulse 2s infinite; }
+        .pulse-dot.offline { background-color: var(--term-red); box-shadow: 0 0 10px var(--term-red); animation: none; }
         @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); } 70% { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); } 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); } }
         .tab-btn { background: transparent; color: #737373; padding: 8px 10px; font-size: 0.60rem; font-family: 'Consolas', monospace; font-weight: bold; cursor: pointer; border-bottom: 2px solid transparent; border-right: 1px solid var(--term-border); transition: all 0.2s; }
         .tab-btn:hover { color: #d4d4d4; background: #111; }
@@ -847,20 +826,29 @@ PRIN_DASHBOARD_TEMPLATE = """
             width: 100vw !important; height: 100vh !important; z-index: 9999 !important; 
             background-color: #050905 !important; padding: 20px !important; 
         }
+        .tor-alert-banner { display: none; background-color: #ef4444; color: white; padding: 5px 15px; font-weight: bold; text-align: center; font-size: 0.8rem; animation: pulse-bg 1.5s infinite; }
+        @keyframes pulse-bg { 0% { background-color: #ef4444; } 50% { background-color: #b91c1c; } 100% { background-color: #ef4444; } }
     </style>
 </head>
 <body class="h-screen flex flex-col">
+
+    <!-- CRITICAL ALERT BANNER -->
+    <div id="tor-critical-alert" class="tor-alert-banner w-full flex items-center justify-center gap-2 font-mono">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+        CRITICAL OPSEC FAILURE: Tor proxy connection lost. Crawler automatically halted to prevent real IP exposure. Check Tor Background Service.
+    </div>
+
     <header class="border-b border-[#262626] bg-[#050905] flex justify-between items-center px-4 py-2 select-none">
         <div class="flex items-center gap-4">
             <div class="font-bold text-gray-200 tracking-wide text-sm">PRIN <span class="text-gray-500 font-normal">| PLANETARY RESOURCE INTELLIGENCE</span></div>
             <div class="flex gap-2">
-                <div class="px-2 py-0.5 bg-[#1a1a1a] border border-[#333] text-xs font-mono text-green-500 rounded-sm flex items-center gap-2">
+                <div class="px-2 py-0.5 bg-[#1a1a1a] border border-[#333] text-xs font-mono text-green-500 rounded-sm flex items-center gap-2" id="tor-status-container">
                     <div class="pulse-dot" id="api-status-dot"></div>
-                    <span id="api-status-text">OSINT APIs</span>
+                    <span id="api-status-text">TOR TUNNEL SECURE</span>
                 </div>
                 <div class="px-2 py-0.5 bg-[#1a1a1a] border border-[#333] text-xs font-mono text-gray-500 rounded-sm flex items-center gap-2" id="ai-status-container">
                     <div class="pulse-dot" style="background-color: #a855f7;" id="ai-status-dot"></div>
-                    <span id="ai-status-text" class="text-purple-400">GEMINI LINK CHK...</span>
+                    <span id="ai-status-text" class="text-purple-400">PRIN LINK CHK...</span>
                 </div>
             </div>
         </div>
@@ -1017,7 +1005,7 @@ PRIN_DASHBOARD_TEMPLATE = """
                     </div>
 
                     <div id="tab-logs" class="tab-content text-[10px] text-gray-500 space-y-1">
-                        <div class="text-green-700">>> INITIALIZING 7-DAY HISTORICAL DATA FUSION KERNEL v14.9...</div>
+                        <div class="text-green-700">>> INITIALIZING 7-DAY HISTORICAL DATA FUSION KERNEL v15.1...</div>
                     </div>
                 </div>
             </div>
@@ -1050,7 +1038,7 @@ PRIN_DASHBOARD_TEMPLATE = """
                     <div id="modal-summary" class="bg-[#050905] border border-[#333] p-3 text-gray-400 h-32 overflow-y-auto whitespace-pre-wrap leading-relaxed font-mono text-[10px]"></div>
                 </div>
                 <div class="pt-2 border-t border-[#333] mt-2">
-                    <span class="text-purple-500 font-bold block mb-2 flex items-center gap-2"><div class="w-2 h-2 bg-purple-500 rounded-full animate-pulse"></div> [ GEMINI AI ANALYSIS ]</span>
+                    <span class="text-purple-500 font-bold block mb-2 flex items-center gap-2"><div class="w-2 h-2 bg-purple-500 rounded-full animate-pulse"></div> [ PRIN AI ANALYSIS ]</span>
                     <div id="onion-modal-ai" class="bg-[#0a0510] border border-purple-900/50 p-3 text-purple-400 leading-relaxed font-mono text-[10px] min-h-[60px]">AWAITING INITIALIZATION...</div>
                 </div>
             </div>
@@ -1082,7 +1070,7 @@ PRIN_DASHBOARD_TEMPLATE = """
                     <span id="geo-modal-currency" class="text-green-400 font-bold bg-green-900/20 px-2 py-1 rounded border border-green-900/50"></span>
                 </div>
                 <div class="pt-2 border-t border-[#333] mt-2">
-                    <span class="text-purple-500 font-bold block mb-2 flex items-center gap-2"><div class="w-2 h-2 bg-purple-500 rounded-full animate-pulse"></div> [ GEMINI AI ANALYSIS ]</span>
+                    <span class="text-purple-500 font-bold block mb-2 flex items-center gap-2"><div class="w-2 h-2 bg-purple-500 rounded-full animate-pulse"></div> [ PRIN AI ANALYSIS ]</span>
                     <div id="geo-modal-ai" class="bg-[#0a0510] border border-purple-900/50 p-3 text-purple-400 leading-relaxed font-mono text-[10px] min-h-[60px]">AWAITING INITIALIZATION...</div>
                 </div>
             </div>
@@ -1114,7 +1102,7 @@ PRIN_DASHBOARD_TEMPLATE = """
                     <div id="node-modal-targets" class="bg-[#050905] border border-[#333] p-3 text-cyan-400 h-24 overflow-y-auto whitespace-pre-wrap leading-relaxed font-mono text-[10px] space-y-1 custom-scrollbar"></div>
                 </div>
                 <div class="pt-2 border-t border-[#333] mt-2">
-                    <span class="text-purple-500 font-bold block mb-2 flex items-center gap-2"><div class="w-2 h-2 bg-purple-500 rounded-full animate-pulse"></div> [ GEMINI AI CORRELATION ]</span>
+                    <span class="text-purple-500 font-bold block mb-2 flex items-center gap-2"><div class="w-2 h-2 bg-purple-500 rounded-full animate-pulse"></div> [ PRIN AI CORRELATION ]</span>
                     <div id="node-modal-ai" class="bg-[#0a0510] border border-purple-900/50 p-3 text-purple-400 leading-relaxed font-mono text-[10px] min-h-[60px]">AWAITING INITIALIZATION...</div>
                 </div>
             </div>
@@ -1146,6 +1134,9 @@ PRIN_DASHBOARD_TEMPLATE = """
     </div>
 
     <script>
+        // GLOBALS & STATE
+        let torConnected = true;
+
         function copyToClipboard(text) {
             const textArea = document.createElement("textarea");
             textArea.value = text;
@@ -1158,8 +1149,8 @@ PRIN_DASHBOARD_TEMPLATE = """
         async function testAIConnection() {
             const aiStatusDot = document.getElementById('ai-status-dot');
             const aiStatusText = document.getElementById('ai-status-text');
-            const apiKey = "AIzaSyCw2G_BeHQW-CzGmsyTlhZM5-_Vs6tmJSQ"; 
-            const modelName = "gemini-1.5-flash"; 
+            const apiKey = "TO_BE_FIXED_SOON"; 
+            const modelName = "PRIN-1.5-flash"; 
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
             
             try {
@@ -1170,17 +1161,17 @@ PRIN_DASHBOARD_TEMPLATE = """
                 });
                 
                 if (response.ok) {
-                    aiStatusText.innerText = "GEMINI AI ONLINE";
+                    aiStatusText.innerText = "PRIN AI ONLINE";
                     aiStatusText.className = "text-purple-400 font-bold";
                     aiStatusDot.style.backgroundColor = "#c084fc";
-                    logSystemEvent("Gemini Agentic AI Neural Link Established.", "success");
+                    logSystemEvent("PRIN Agentic AI Neural Link Established.", "success");
                 } else { throw new Error("API Response not OK"); }
             } catch (e) {
-                aiStatusText.innerText = "GEMINI AI OFFLINE";
+                aiStatusText.innerText = "PRIN AI OFFLINE";
                 aiStatusText.className = "text-red-500 font-bold";
                 aiStatusDot.style.backgroundColor = "#ef4444";
                 aiStatusDot.classList.remove('pulse-dot');
-                logSystemEvent("Gemini AI Link Failed - Check Environment Keys.", "error");
+                logSystemEvent("PRIN AI Link Failed - Check Environment Keys.", "error");
             }
         }
 
@@ -1192,16 +1183,16 @@ PRIN_DASHBOARD_TEMPLATE = """
                         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
-                    <span>>> GEMINI AI PROCESSING THREAT VECTORS...</span>
+                    <span>>> PRIN AI PROCESSING THREAT VECTORS...</span>
                 </div>`;
             
             const apiKey = "AIzaSyCw2G_BeHQW-CzGmsyTlhZM5-_Vs6tmJSQ"; 
-            const modelName = "gemini-1.5-flash";
+            const modelName = "PRIN-1.5-flash";
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
             
             const payload = {
                 contents: [{ role: "user", parts: [{ text: prompt }] }],
-                systemInstruction: { parts: [{ text: "You are PRIN AI_SYS_04, an advanced Agentic Threat Intelligence AI powered by Gemini. Provide a concise, highly analytical, and tactical threat assessment in under 4 sentences. Focus directly on the exact risks, downstream cascading consequences, and what is currently happening. Use a serious, military-intelligence tone." }] }
+                systemInstruction: { parts: [{ text: "You are PRIN AI_SYS_04, an advanced Agentic Threat Intelligence AI powered by PRIN. Provide a concise, highly analytical, and tactical threat assessment in under 4 sentences. Focus directly on the exact risks, downstream cascading consequences, and what is currently happening. Use a serious, military-intelligence tone." }] }
             };
             
             try {
@@ -1216,8 +1207,8 @@ PRIN_DASHBOARD_TEMPLATE = """
                 const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
                 
                 if (text) { el.innerHTML = `<span class="text-purple-400 font-bold">${text.replace(/\\n/g, '<br>')}</span>`; } 
-                else { el.innerHTML = '<span class="text-red-500">>> GEMINI ANALYSIS PAYLOAD EMPTY.</span>'; }
-            } catch (error) { el.innerHTML = `<span class="text-red-500">>> GEMINI NEURAL LINK DISCONNECTED...</span>`; }
+                else { el.innerHTML = '<span class="text-red-500">>> PRIN ANALYSIS PAYLOAD EMPTY.</span>'; }
+            } catch (error) { el.innerHTML = `<span class="text-red-500">>> PRIN NEURAL LINK DISCONNECTED...</span>`; }
         }
 
         const tabBtns = document.querySelectorAll('.tab-btn');
@@ -1233,6 +1224,39 @@ PRIN_DASHBOARD_TEMPLATE = """
                 }
             });
         });
+
+        // OPSEC STATUS MATCHER
+        async function checkSystemStatus() {
+            try {
+                const res = await fetch('/api/system_status');
+                const data = await res.json();
+                
+                const dot = document.getElementById('api-status-dot');
+                const text = document.getElementById('api-status-text');
+                const container = document.getElementById('tor-status-container');
+                const banner = document.getElementById('tor-critical-alert');
+
+                if (data.tor_connected) {
+                    if(!torConnected) {
+                        logSystemEvent("Tor Proxy Re-established. Resuming operations safely.", "success");
+                    }
+                    torConnected = true;
+                    dot.classList.remove('offline'); dot.classList.add('pulse-dot');
+                    text.innerText = "TOR TUNNEL SECURE"; text.className = "text-green-500";
+                    container.className = "px-2 py-0.5 bg-[#1a1a1a] border border-[#333] text-xs font-mono text-green-500 rounded-sm flex items-center gap-2";
+                    banner.style.display = 'none';
+                } else {
+                    if(torConnected) {
+                        logSystemEvent("CRITICAL OPSEC ALERT: Tor Proxy Lost. Crawler suspended immediately.", "error");
+                    }
+                    torConnected = false;
+                    dot.classList.add('offline'); dot.classList.remove('pulse-dot');
+                    text.innerText = "TOR OFFLINE - ABORTED"; text.className = "text-red-500";
+                    container.className = "px-2 py-0.5 bg-[#2a0000] border border-red-800 text-xs font-mono text-red-500 rounded-sm flex items-center gap-2";
+                    banner.style.display = 'flex';
+                }
+            } catch (e) { console.error(e); }
+        }
 
         window.currentDarkWebData = [];
         window.currentGeoData = [];
@@ -1303,7 +1327,8 @@ PRIN_DASHBOARD_TEMPLATE = """
                 });
                 doc.save('PRIN_Full_Threat_Extraction.pdf');
             } catch(e) {
-                console.error("PDF Export Error:", e); alert("Critical failure extracting PDF database.");
+                console.error("PDF Export Error:", e);
+                logSystemEvent("Critical failure extracting PDF database.", "error");
             } finally { btn.innerText = originalText; btn.disabled = false; }
         }
 
@@ -1313,7 +1338,11 @@ PRIN_DASHBOARD_TEMPLATE = """
             if (currentThreatCategory !== "ALL") filteredData = window.currentDarkWebData.filter(item => item.classification === currentThreatCategory);
 
             if (filteredData.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="4" class="text-center py-4 text-gray-600 animate-pulse font-mono text-[10px]">AWAITING THREAT PAYLOAD... (SWEEPING DEEP WEB FRONTIER)</td></tr>`;
+                if(!torConnected) {
+                    tbody.innerHTML = `<tr><td colspan="4" class="text-center py-4 text-red-500 animate-pulse font-bold text-[10px]">TOR OFFLINE - NO DATA TRANSMISSION</td></tr>`;
+                } else {
+                    tbody.innerHTML = `<tr><td colspan="4" class="text-center py-4 text-gray-600 animate-pulse font-mono text-[10px]">AWAITING THREAT PAYLOAD...</td></tr>`;
+                }
                 return;
             }
 
@@ -1339,7 +1368,6 @@ PRIN_DASHBOARD_TEMPLATE = """
 
                 const originalIndex = window.currentDarkWebData.findIndex(x => x.url === item.url);
 
-                // Mock Validation pseudo-randomness logic mapped to URL
                 const tagIndex = Array.from(item.url).reduce((acc, char) => acc + char.charCodeAt(0), 0) % tags.length;
                 const activeTag = tags[tagIndex];
 
@@ -1729,9 +1757,13 @@ PRIN_DASHBOARD_TEMPLATE = """
                 
                 const data = resultObj.data;
                 const statusEl = document.getElementById('tor-status');
-                if (resultObj.status === 'simulated') {
-                    statusEl.innerText = "● SIMULATION OVERRIDE";
-                    statusEl.className = "text-[9px] text-yellow-500 animate-pulse whitespace-nowrap flex items-center h-6 px-1";
+                
+                // CRITICAL OPSEC CHECK: If API returns error/offline due to proxy failure
+                if (resultObj.status === "error" || resultObj.status === "offline") {
+                    statusEl.innerText = "● TOR TUNNEL DISCONNECTED";
+                    statusEl.className = "text-[9px] text-red-500 animate-pulse whitespace-nowrap flex items-center h-6 px-1";
+                    renderDarkWebTable(); // Will show offline message
+                    return;
                 } else {
                     statusEl.innerText = "● LIVE SYNC";
                     statusEl.className = "text-[9px] text-green-500 animate-pulse whitespace-nowrap flex items-center h-6 px-1";
@@ -1809,13 +1841,17 @@ PRIN_DASHBOARD_TEMPLATE = """
             fetchConnections();
             fetchGlobeIPs();
             
+            // OPSEC: Check system connection status immediately and continuously
+            checkSystemStatus();
+            setInterval(checkSystemStatus, 3000);
+
             setInterval(fetchDarkWebIntel, 5000); 
             setInterval(fetchGlobeIPs, 3000);
             setInterval(() => { fetchAndRenderGraph(); fetchConnections(); }, 60000); // 60s for performance
             setInterval(fetchGeopolitics, 20000); 
             
             pushToLiveFeed('EXTERNAL FEEDS ONLINE', 'Threat OSINT engines synced securely.', 'success');
-            logSystemEvent("Gemini Agentic Models Loaded.", "success");
+            logSystemEvent("PRIN Agentic Models Loaded.", "success");
             logSystemEvent("Link Analysis Engine Init: Mapping Extracted Entities...", "success");
         }
         
@@ -1881,14 +1917,12 @@ PRIN_DASHBOARD_TEMPLATE = """
 
                 context.beginPath(); path(data); context.fillStyle = '#090f1a'; context.fill();
 
-                // Refined "Crisp Cyber-Light" Border Styling
-                context.lineWidth = 0.2;          // Thinner line for map precision
-                context.strokeStyle = '#38bdf8';  // Electric cyan
+                context.lineWidth = 0.2;          
+                context.strokeStyle = '#38bdf8';  
                 context.shadowColor = '#38bdf8';
-                context.shadowBlur = 2;           // Tight, subtle glow (not overwhelming)
+                context.shadowBlur = 2;           
                 context.stroke();
 
-                // CRITICAL: Reset shadow so red threat nodes render cleanly
                 context.shadowBlur = 0;
                 const time = Date.now() / 1000;
                 const activeNodes = SYSTEM_STATE.nodes[SYSTEM_STATE.activeLayer] || [];
@@ -2010,17 +2044,24 @@ def logout():
 def dashboard():
     return render_template_string(PRIN_DASHBOARD_TEMPLATE)
 
+@app.route("/api/system_status")
+@login_required
+def api_system_status():
+    """Exposes real-time OPSEC state to the UI to halt fetches if Tor breaks."""
+    return jsonify({"tor_connected": TOR_CONNECTED})
+
 @app.route("/api/darkweb")
 @login_required
 def api_darkweb():
-    live_status = "live" if TOR_AVAILABLE else "simulated"
+    # Strict Killswitch
+    if not TOR_CONNECTED:
+        return jsonify({"status": "offline", "data": [], "error": "TOR DISCONNECTED - SAFE ABORT"}), 403
+
     try:
-        # Use a timeout and specific isolation level for concurrent reads
         conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row # Allows accessing columns by name
+        conn.row_factory = sqlite3.Row 
         cur = conn.cursor()
         
-        # Pull the latest results
         cur.execute("""
             SELECT url, title, status, classification, fetched_at, content_summary 
             FROM pages 
@@ -2031,9 +2072,7 @@ def api_darkweb():
         
         result = []
         for r in rows:
-            # Safely handle potential nulls
             domain = urlparse(r['url']).netloc if r['url'] else "unknown"
-            
             result.append({
                 "url": f"http://{domain}/",
                 "matched_url": r['url'],
@@ -2043,11 +2082,10 @@ def api_darkweb():
                 "summary": r['content_summary'] or "No summary available."
             })
             
-        return jsonify({"status": live_status, "data": result})
+        return jsonify({"status": "live", "data": result})
     except Exception as e: 
         print(f"[CRITICAL API ERROR]: {e}")
-        # Return a valid JSON even on error so the UI doesn't show 'OFFLINE'
-        return jsonify({"status": live_status, "data": [], "error": str(e)})
+        return jsonify({"status": "error", "data": [], "error": str(e)})
     finally:
         if 'conn' in locals(): conn.close()
 
@@ -2069,7 +2107,7 @@ def api_globe_ips():
 @app.route("/api/graph")
 @login_required
 def api_graph():
-    """Knowledge Graph mappings sourced strictly from the exact crawler's DB. Payload capped for UI performance."""
+    """Knowledge Graph mappings sourced strictly from the exact crawler's DB."""
     nodes = []
     edges = []
     added_nodes = set()
@@ -2084,29 +2122,22 @@ def api_graph():
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         
-        # --- GET GLOBAL LIVE DB COUNTS FOR DASHBOARD LEGEND ---
         try:
             cur.execute("SELECT COUNT(DISTINCT url) FROM pages WHERE classification != 'Dead Node'")
             stats["onions"] = cur.fetchone()[0]
-            
             cur.execute("SELECT COUNT(DISTINCT to_url) FROM links WHERE to_url LIKE 'btc:%'")
             stats["btc"] = cur.fetchone()[0]
-            
             cur.execute("SELECT COUNT(DISTINCT to_url) FROM links WHERE to_url LIKE 'ip:%'")
             stats["ip"] = cur.fetchone()[0]
-            
             cur.execute("SELECT COUNT(DISTINCT to_url) FROM links WHERE to_url LIKE 'email:%'")
             stats["email"] = cur.fetchone()[0]
-            
             cur.execute("SELECT COUNT(DISTINCT to_url) FROM links WHERE to_url LIKE 'cve:%'")
             stats["cve"] = cur.fetchone()[0]
-
             cur.execute("SELECT COUNT(*) FROM links")
             stats["edges"] = cur.fetchone()[0]
-        except Exception as e:
+        except Exception:
             pass
         
-        # PERFORMANCE FIX: API limited to recent links to prevent UI freezes
         cur.execute("SELECT from_url, to_url FROM links ORDER BY id DESC LIMIT 1500")
         link_rows = cur.fetchall()
         for r in link_rows:
@@ -2117,7 +2148,6 @@ def api_graph():
             except: from_host = "Node"
             add_node(from_url, from_host, "url", f"Origin: {from_url}")
             
-            # Identify if target is an extracted Entity (BTC, IP, CVE) or a normal URL
             if to_url.startswith("btc:"):
                 add_node(to_url, to_url.replace("btc:", "")[:8] + "..", "btc", f"BTC: {to_url.replace('btc:', '')}")
             elif to_url.startswith("cve:"):
@@ -2136,7 +2166,6 @@ def api_graph():
                 
             edges.append({"from": from_url, "to": to_url, "label": "links_to"})
 
-        # Map some standalone pages just in case they have no edges yet
         cur.execute("SELECT url, title FROM pages ORDER BY id DESC LIMIT 200")
         page_rows = cur.fetchall()
         for r in page_rows:
@@ -2180,11 +2209,9 @@ def api_node_summary():
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         
-        # Trace backwards: Find where this node came from
         cur.execute("SELECT from_url FROM links WHERE to_url = ? LIMIT 50", (node_id,))
         origins = [r[0] for r in cur.fetchall()]
         
-        # Trace forwards: Find what this node links out to
         cur.execute("SELECT to_url FROM links WHERE from_url = ? LIMIT 50", (node_id,))
         targets = [r[0] for r in cur.fetchall()]
         
@@ -2219,7 +2246,6 @@ def api_entity_list():
             cur.execute("SELECT to_url, from_url FROM links WHERE to_url LIKE ? ORDER BY id DESC LIMIT 2000", (prefix,))
             rows = cur.fetchall()
             
-            # Group origin sources by entity target
             grouped = {}
             for to_url, from_url in rows:
                 if to_url not in grouped:
@@ -2240,7 +2266,7 @@ def api_entity_list():
                     "id": to_url,
                     "value": display_val,
                     "raw_value": val,
-                    "sources": list(sources)[:10] # Show top 10 origin links per entity
+                    "sources": list(sources)[:10] 
                 })
                 
         return jsonify({"data": data})
@@ -2287,114 +2313,91 @@ def api_geopolitics():
     return jsonify(GLOBAL_GEO_DATA)
 
 
-# --- ACTIVE TOR DETECTION UTILITY ---
-def get_active_tor_proxy():
-    """Checks if Tor is actually running on standard ports before crawling."""
-    for port in [9150, 9050]:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-            if s.connect_ex(('127.0.0.1', port)) == 0:
-                return f"socks5h://127.0.0.1:{port}"
-    return None
-
-# ==============================================================================
-# SECTION 7: MAIN Execution
-# ==============================================================================
-
 def start_dashboard_system():
-    print("--- Initializing Intelligence Platform ---")
+    print("--- Initializing Secure Intelligence Platform ---")
     setup_dashboard_db()
     
-    # Pre-initialize the crawler DB so the UI API doesn't fail on boot!
+    # Pre-initialize the crawler DB so the UI API doesn't fail on boot
     conn = init_db(DB_PATH)
     
-    # --- WIPE PREVIOUS CRAWLER HISTORY FOR FRESH START AS REQUESTED ---
+    # Erase history on fresh boot if desired
     print("[!] Erasing previous crawler history (Fresh Start Mode)...")
     cur = conn.cursor()
     cur.execute("DELETE FROM pages")
     cur.execute("DELETE FROM links")
     conn.commit()
     conn.close()
-    
+
     try:
         conn = get_dashboard_db_connection()
         create_user(conn, "admin", "adminpass", is_admin=True)
         if hasattr(conn, 'close'): conn.close()
     except Exception: pass
-    print("Default user access: admin / adminpass")
     
-    global TOR_AVAILABLE, TOR_SOCKS_PROXY, PROXIES
-    if TOR_AVAILABLE:
-        tor_proxy = get_active_tor_proxy()
-        if not tor_proxy:
-            print("\n[!] WARNING: PySocks is installed, but Tor is NOT running on 9150 or 9050.")
-            print("[!] Crawler will fail. Falling back to Simulation Mode for UI continuity.\n")
-            TOR_AVAILABLE = False
-        else:
-            TOR_SOCKS_PROXY = tor_proxy
-            PROXIES = {"http": TOR_SOCKS_PROXY, "https": TOR_SOCKS_PROXY}
-            print(f"[!] Active Tor Connection detected at {TOR_SOCKS_PROXY}")
+    # the Watchdog to test for tor presence immediately
+    watchdog = threading.Thread(target=tor_watchdog_worker, daemon=True)
+    watchdog.start()
+    time.sleep(2)
 
-    if TOR_AVAILABLE:
-        def start_robust_crawler():
-            print("Starting MASSIVE Threaded Exponential Crawler Engine...")
-            while True:
-                try:
-                    c_conn = init_db(DB_PATH) 
-                    cur = c_conn.cursor()
-                    
-                    # Fetch the absolute frontier (unvisited linked nodes)
-                    cur.execute('''
-                        SELECT DISTINCT to_url 
-                        FROM links 
-                        WHERE to_url NOT IN (SELECT url FROM pages)
-                    ''')
-                    # Ensure we only inject real URLs back into the frontier, skipping extracted entities!
-                    all_unvisited = [r[0] for r in cur.fetchall() if r[0].endswith('.onion') or '.onion/' in r[0]]
-                    c_conn.close()
-                    
-                    # CRITICAL FIX: DOMAIN DIVERSITY INJECTION
-                    # Group the unvisited links by domain and pick exactly 1 per domain.
-                    # This completely breaks the crawler out of single-site "nests".
-                    random.shuffle(all_unvisited)
-                    frontier_seeds = []
-                    seen_frontier_domains = set()
-                    
-                    for u in all_unvisited:
-                        dom = urlparse(u).netloc
-                        if dom not in seen_frontier_domains:
-                            seen_frontier_domains.add(dom)
-                            frontier_seeds.append(u)
-                        # Cap at 150 unique new websites per sweep
-                        if len(frontier_seeds) >= 150:
-                            break
-                    
-                    if not frontier_seeds:
-                        print("[!] Graph frontier empty. Re-seeding from massive directories...")
-                        # FIX: Hard-reset the seed nodes in the database so they are actively re-crawled
-                        c_conn = init_db(DB_PATH)
-                        cur = c_conn.cursor()
-                        for s in SEED_URLS:
-                            cur.execute("DELETE FROM pages WHERE url = ?", (canonicalize(s),))
-                        c_conn.commit()
-                        c_conn.close()
-                        current_seeds = SEED_URLS
-                    else:
-                        print(f"[!] Target Acquired: Attacking {len(frontier_seeds)} UNIQUE new domains...")
-                        current_seeds = list(set(SEED_URLS + frontier_seeds))
-                    
-                    crawl(current_seeds, DB_PATH, max_pages=1000, max_depth=MAX_DEPTH)
-                    print("[!] Crawler Sub-Sweep Finished. Resting 5s before next expansion phase...")
-                    time.sleep(5)
-                except Exception as e:
-                    print(f"[!] Crawler Thread Error: {e}")
-                    time.sleep(5)
-            
-        worker_thread = threading.Thread(target=start_robust_crawler, daemon=True)
-        worker_thread.start()
+    if not TOR_CONNECTED:
+        print("\n[!] CRITICAL WARNING: TOR PROXY IS NOT RUNNING ON PORT 9150 OR 9050.")
+        print("[!] The Web UI will load, but the Crawler is mathematically LOCKED and will NOT fetch anything over clearnet.")
     else:
-        sim_thread = threading.Thread(target=simulated_darkweb_worker, daemon=True)
-        sim_thread.start()
+        print("\n[OPSEC] Greenlight. Tor Proxy Secured. DNS Leaks Blocked.")
+
+    def start_robust_crawler():
+        print("Starting SECURE Threaded Crawler Engine...")
+        while True:
+            if not TOR_CONNECTED:
+                # Idle state if Tor goes offline. Never proceed over direct IP.
+                time.sleep(5)
+                continue
+
+            try:
+                c_conn = init_db(DB_PATH) 
+                cur = c_conn.cursor()
+                
+                cur.execute('''
+                    SELECT DISTINCT to_url 
+                    FROM links 
+                    WHERE to_url NOT IN (SELECT url FROM pages)
+                ''')
+                all_unvisited = [r[0] for r in cur.fetchall() if r[0].endswith('.onion') or '.onion/' in r[0]]
+                c_conn.close()
+                
+                random.shuffle(all_unvisited)
+                frontier_seeds = []
+                seen_frontier_domains = set()
+                
+                for u in all_unvisited:
+                    dom = urlparse(u).netloc
+                    if dom not in seen_frontier_domains:
+                        seen_frontier_domains.add(dom)
+                        frontier_seeds.append(u)
+                    if len(frontier_seeds) >= 150:
+                        break
+                
+                if not frontier_seeds:
+                    print("[!] Graph frontier empty. Re-seeding from massive directories...")
+                    c_conn = init_db(DB_PATH)
+                    cur = c_conn.cursor()
+                    for s in SEED_URLS:
+                        cur.execute("DELETE FROM pages WHERE url = ?", (canonicalize(s),))
+                    c_conn.commit()
+                    c_conn.close()
+                    current_seeds = SEED_URLS
+                else:
+                    print(f"[!] Target Acquired: Attacking {len(frontier_seeds)} UNIQUE new domains securely...")
+                    current_seeds = list(set(SEED_URLS + frontier_seeds))
+                
+                crawl(current_seeds, DB_PATH, max_pages=1000, max_depth=MAX_DEPTH)
+                print("[!] Crawler Sub-Sweep Finished. Resting 5s before next expansion phase...")
+                time.sleep(5)
+            except Exception as e:
+                time.sleep(5)
+    
+    worker_thread = threading.Thread(target=start_robust_crawler, daemon=True)
+    worker_thread.start()
 
     geo_thread = threading.Thread(target=geopolitics_worker, daemon=True)
     geo_thread.start()
@@ -2402,7 +2405,7 @@ def start_dashboard_system():
     ip_thread = threading.Thread(target=ip_resolver_worker, daemon=True)
     ip_thread.start()
     
-    print("Web dashboard running at: http://127.0.0.1:5090")
+    print("Secure Web dashboard running at: http://127.0.0.1:5090")
     app.run(port=5090, debug=False)
 
 if __name__ == "__main__":
