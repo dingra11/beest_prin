@@ -10,6 +10,7 @@
 Prin is a cyber-security platform to crawl the details of dark web host onion websites and leaked emails linked with it. Not only emails but also BTC ids, PG keys, and IP address using proper protocol proxy while hiding our own identity. This will help the cyber police to directly reduce dark market.
 </div>
 
+<b>BEST WAY TO USE IT TO DOWNLOAD THE CODE LOCAL AND OPEN TOR BROWSER IN BACKGROUND AND RUN THE CODE. DONT WORRY I HAVE APPLIED SEVERAL PROTOCOL PROXY TO HIDE YOUR IDENTITY BUT.... I AM ALSO NOT SURE :)</b>
 ---
 
 ### Dashboard Overview
