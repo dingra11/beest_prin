@@ -1,7 +1,8 @@
-Flask==3.0.0
-Flask-Login==0.6.3
+Flask
+Flask-Login
 requests
 beautifulsoup4
 Pillow
 ImageHash
 gunicorn
+PySocks
