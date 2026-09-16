@@ -1,5 +1,3 @@
-#Beest #Hackclub
-
 <div align="center">
 
 <img src="images/prin.png" width="180"/>
