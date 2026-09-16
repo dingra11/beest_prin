@@ -67,8 +67,4 @@ PRIN is built using Python, Flask, SQLite/PostgreSQL, JavaScript, D3.js, Vis Net
 
 ## Project Links
 
-Website: will update soon 
-
-Documentation: will update soon 
-
-Live Demo: will update soon
+Website: beest-prin.onrender.com
